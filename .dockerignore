@@ -1,0 +1,10 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.DS_Store
+.git
+.gitignore
+.github
+data/*             # optional: exclude raw data from image
+.env

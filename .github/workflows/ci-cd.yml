@@ -1,0 +1,77 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+env:
+  PYTHON_VERSION: "3.11"
+  AZ_RESOURCE_GROUP: ${{ secrets.AZ_RESOURCE_GROUP }}
+  AZ_REGION: ${{ secrets.AZ_REGION }}
+  AZ_SUBSCRIPTION_ID: ${{ secrets.AZ_SUBSCRIPTION_ID }}
+  ACR_NAME: ${{ secrets.ACR_NAME }}
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+  WEBAPP_NAME: ${{ secrets.WEBAPP_NAME }}
+  IMAGE_NAME: ${{ secrets.IMAGE_NAME }}
+
+jobs:
+  test-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Lint
+        run: flake8 .
+      - name: Tests
+        run: pytest -q
+
+  build-and-push:
+    needs: test-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set subscription
+        run: az account set --subscription $AZ_SUBSCRIPTION_ID
+
+      - name: Docker login to ACR
+        run: |
+          echo ${{ secrets.ACR_PASSWORD }} | docker login $ACR_LOGIN_SERVER -u ${{ secrets.ACR_USERNAME }} --password-stdin
+
+      - name: Build and push image
+        run: |
+          IMAGE_TAG=${GITHUB_SHA::7}
+          docker build -t $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG -t $ACR_LOGIN_SERVER/$IMAGE_NAME:latest .
+          docker push $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG
+          docker push $ACR_LOGIN_SERVER/$IMAGE_NAME:latest
+        id: buildpush
+
+      - name: Deploy to Azure Web App (set container image)
+        run: |
+          IMAGE_TAG=${GITHUB_SHA::7}
+          az webapp config container set \
+            --name $WEBAPP_NAME \
+            --resource-group $AZ_RESOURCE_GROUP \
+            --docker-custom-image-name $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG \
+            --docker-registry-server-url https://$ACR_LOGIN_SERVER \
+            --docker-registry-server-user ${{ secrets.ACR_USERNAME }} \
+            --docker-registry-server-password ${{ secrets.ACR_PASSWORD }}
+
+      - name: Set app settings (port/env)
+        run: |
+          az webapp config appsettings set -g $AZ_RESOURCE_GROUP -n $WEBAPP_NAME --settings WEBSITES_PORT=8501 APP_ENV=prod
+
+      - name: Restart app
+        run: az webapp restart -g $AZ_RESOURCE_GROUP -n $WEBAPP_NAME
